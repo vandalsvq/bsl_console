@@ -1,7 +1,7 @@
 ---
 issue: "-"
 title: Загрузка синтакс-помощника 1С из формы консоли
-status: in-progress
+status: done
 owner: vandalsvq
 created: 2026-08-12
 updated: 2026-08-12
