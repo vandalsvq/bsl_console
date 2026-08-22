@@ -1,4 +1,4 @@
-# Пересборка .epf-обёртки консоли с новым single-file HTML — доставка полевого гейта спайка.
+﻿# Пересборка .epf-обёртки консоли с новым single-file HTML — доставка полевого гейта спайка.
 #
 # Механика (выяснено разбором console-single-b.epf, 2026-07-13): форма читает макет "single"
 # (тип BinaryData, RAW UTF-8 HTML, БЕЗ сжатия — V8-контейнер жмёт сам) в ЭтотОбъект.HTML.
@@ -42,12 +42,23 @@ $dumpLog = Join-Path $work "dump.log"
 $pd = Start-Process -FilePath $exe -ArgumentList @("DESIGNER", "/F$ib", "/DumpExternalDataProcessorOrReportToFiles", "$dump", "$Template", "/Out$dumpLog", "/DisableStartupDialogs", "/DisableStartupMessages") -Wait -PassThru -WindowStyle Hidden
 if ($pd.ExitCode -ne 0) { Get-Content $dumpLog -ErrorAction SilentlyContinue; throw "Dump .epf упал (exit $($pd.ExitCode))" }
 
-# 4. Найти корневой xml объекта с макетом single.
-$rootXml = Get-ChildItem $dump -Filter *.xml -File | Where-Object { Test-Path (Join-Path $dump "$($_.BaseName)\Templates\single\Ext\Template.bin") } | Select-Object -First 1
-if (-not $rootXml) { throw "В дампе не найден объект с макетом single" }
+# 4. Найти корневой xml объекта и макет с HTML. Имя макета в разных обёртках разное
+#    (в спайковой — single, в консоли автора — src), поэтому ищем по содержимому.
+$rootXml = $null
+$single = $null
+foreach ($xml in (Get-ChildItem $dump -Filter *.xml -File)) {
+  $templates = Join-Path $dump "$($xml.BaseName)\Templates"
+  if (-not (Test-Path $templates)) { continue }
+  foreach ($bin in (Get-ChildItem $templates -Recurse -Filter Template.bin -File)) {
+    $head = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($bin.FullName)[0..63])
+    if ($head -match '(?i)^\s*<!doctype html|^\s*<html') { $rootXml = $xml; $single = $bin.FullName; break }
+  }
+  if ($single) { break }
+}
+if (-not $rootXml) { throw "В дампе не найден макет с HTML (ни single, ни src)" }
+Write-Host "макет с HTML: $(Split-Path (Split-Path $single -Parent) -Parent | Split-Path -Leaf)"
 
-# 5. Вложить новый HTML в макет single (RAW UTF-8, без сжатия).
-$single = Join-Path $dump "$($rootXml.BaseName)\Templates\single\Ext\Template.bin"
+# 5. Вложить новый HTML в найденный макет (RAW UTF-8, без сжатия).
 Copy-Item $Html $single -Force
 $hdr = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($single)[0..14])
 Write-Host "макет single: '$hdr' ($([math]::Round((Get-Item $single).Length/1MB,2)) MB)"
