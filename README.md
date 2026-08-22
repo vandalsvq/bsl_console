@@ -94,6 +94,20 @@ npm run build:pack
 
 ##### Опции сборки
 
+По умолчанию штатный интерфейс Monaco (поиск, контекстные меню, панель inline-подсказок и другие
+виджеты) собирается на русском языке. Английские варианты основных команд:
+
+```js
+npm run debug:en
+npm run build:en
+npm run build:single:en
+npm run build:pack:en
+```
+
+То же значение можно передать webpack напрямую: `--env monacoLocale=en`. Поддерживаются только
+`ru` и `en`; локаль фиксируется на время жизни HTML-документа. Функция `switchLang` переключает
+язык программных подсказок BSL и не меняет штатный интерфейс Monaco.
+
 Для передачи дополнительных опций, используемых при создании редактора, можно воспользоваться следующей командой:
 
 ```js
@@ -133,6 +147,7 @@ npm run build -- --env customOptions="automaticLayout: true, someOption: false"
 | `getCurrentLineContent`        | Возвращает содержимое текущей строки                                                          |
 | `getCurrentLine`               | Возвращает номер текущей строки                                                               |
 | `getCurrentColumn`             | Возвращает номер текущей колонки                                                              |
+| `getCurrentWord`               | Возвращает текущее слово и его позици                                                         |
 | [`getModuleMethods`](docs/get_module_methods.md) | Возвращает JSON-описание процедур и функций модуля; список перехода открывается по `CTRL+ALT+P` |
 | `getQuery`                     | Определяет текст запроса в текущей позиции и возвращает его вместе с областью текста          |
 | `getFormatString`              | Определяет текст форматной строки в текущей позиции                                           |
@@ -205,8 +220,9 @@ npm run build -- --env customOptions="automaticLayout: true, someOption: false"
 | [`enableKeyBinding`](docs/disable_key_binding.md) | Включает обратно сочетание                                                 |
 | `saveViewState`                | Возвращает JSON-строку с текущими настройками (положение курсора и прокрутки, а также свернутые блоки) |
 | `restoreViewState`             | Восстанавливает настройки. В качестве аргумента принимает JSON-строку, полученную ранее через `saveViewState` |
-| [`parseHelp`](docs/help_browser.md) | Асинхронно загружает `Blob`/`File` или Base64 с `shcntx_*.hbk`/`shlang_*.hbk`            |
-| [`showHelp`](docs/help_browser.md) | Открывает закреплённую справа панель; `CTRL+F1` ищет слово только в готовой справке       |
+| [`parseHelp`](docs/help_browser.md) | Загружает Base64/`Blob`/`File` с `shcntx`, `shlang`, `shquery` или `dcsui`                 |
+| [`getHelpState`](docs/help_browser.md) | Возвращает состояние справки: признак готовности `ready` и полное состояние сервиса   |
+| [`showHelp`](docs/help_browser.md) | Открывает справку текущего режима; с необязательной строкой поиска ищет, как `CTRL+F1`, только в готовом пакете |
 | [`showHelpLoader`](docs/help_browser.md) | Показывает скрытую по умолчанию панель ручного выбора файлов справки                |
 | [`beginBase64Transfer`](docs/base64_transfer.md) | Начинает универсальную порционную передачу Base64                           |
 | [`pushBase64Chunk`](docs/base64_transfer.md) | Добавляет часть Base64 с произвольной границей                                  |
@@ -249,6 +265,9 @@ npm run build -- --env customOptions="automaticLayout: true, someOption: false"
 | [`triggerHovers`](docs/trigger_hovers.md) | Принудительный вызов всплывающей подсказки для текущего слов                       |
 | [`triggerSigHelp`](docs/trigger_signature_help.md) | Принудительный вызов подсказки по вызову процедуры/метода                 |
 | [`showCustomSuggestions`](docs/custom_suggestions.md) | Показ пользовательских подсказок                                       |
+| [`showInlineSuggestion`](docs/show_inline_suggestion.md) | Показ inline-подсказки в текущей позиции редактора                  |
+| `triggerInlineSuggestions`    | Явный запуск штатных inline-подсказок Monaco                                             |
+| [`resolveAIInlineCompletion`](docs/ai_inline_completions.md) | Передача результата AI inline-запроса из 1С                    |
 | `showPreviousCustomSuggestions`| Вывод списка пользовательских подсказок, ранее показанных через `showCustomSuggestions`       |
 | `hideSuggestionsList`          | Скрывает текущий список подсказок                                                             |
 | `hideHoverList`                | Скрывает активную всплывающую подсказку для слова                                             |
@@ -319,7 +338,10 @@ npm run build -- --env customOptions="automaticLayout: true, someOption: false"
 | `EVENT_EVALUATE_EXPRESSION`    | При выборе пункта меню "Вычислить выражение". Возвращает выделенный в редакторе текст         |
 | `EVENT_UPDATE_BREAKPOINTS`     | При интерактивном добавлении/удалении точки останова в редакторе. Возвращает сериализованный в JSON массив номеров строк точек останова |
 | `EVENT_REMOVE_ALL_BREAKPOINTS` | При интерактивном удалении всех точек останова в редакторе                                    |
-| [`EVENT_ON_HELP_READY`](docs/help_ready_event.md) | После успешной загрузки или замены пакета `shcntx`                         |
+| [`EVENT_ON_HELP_READY`](docs/help_ready_event.md) | После успешной загрузки или замены пакетов `shcntx`/`shquery`/`dcsui`. Параметр `{kind}` |
+| [`EVENT_ON_HELP_PREPARED`](docs/help_prepared_event.md) | Ранний сигнал готовности справки (фаза `prepared`: оглавление и индекс заголовков готовы, полнотекстовая индексация ещё идёт). Параметр `{kind}` |
+| [`EVENT_AI_INLINE_COMPLETION_REQUEST`](docs/ai_inline_completions.md) | Запрос AI inline-подсказки у 1С |
+| [`EVENT_AI_INLINE_COMPLETION_CANCEL`](docs/ai_inline_completions.md) | Отмена ранее отправленного AI inline-запроса |
 
 *Перед началом работы с редактором из 1С Предприятия желательно вызвать функцию инициализации и передать в нее текущую версию платформы.*
 Пример:
@@ -343,6 +365,9 @@ setLanguageMode('xml');
 // Переключение в режим встроенного языка
 setLanguageMode('bsl');
 ```
+
+Справка выбирается по режиму: `shcntx` + `shlang` используются в `bsl` и `xml`, `shquery` — только
+в `bsl_query`, `dcsui` — только в `dcs_query`.
 
 ## Горячие клавиши
 

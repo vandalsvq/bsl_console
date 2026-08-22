@@ -4,10 +4,12 @@
 // monaco ДОЛЖНЫ отработать до того, как наш код (bsl_language → bsl_helper, finder, actions)
 // впервые коснётся monaco:
 //   1) polyfills          — рантайм-API старого WebKit ДО любого кода monaco
-//   2) monaco-environment — self.MonacoEnvironment (globalAPI + blob-воркер) ДО monaco
-//   3) product-service    — registerSingleton(IProductService) ДО StandaloneServices
-//   4) expose-monaco      — import monaco (editor.main: API + ВСЕ контрибы) + window.monaco
+//   2) monaco-ui-locale   — выбранная сборкой NLS-таблица ДО любого кода monaco
+//   3) monaco-environment — self.MonacoEnvironment (globalAPI + blob-воркер) ДО monaco
+//   4) product-service    — registerSingleton(IProductService) ДО StandaloneServices
+//   5) expose-monaco      — import monaco (editor.main: API + ВСЕ контрибы) + window.monaco
 import './polyfills';
+import 'monaco-ui-locale';
 import './monaco-environment';
 import './product-service';
 import monaco from './expose-monaco';
@@ -27,15 +29,43 @@ import { patchWebKit1C } from './1c-webkit-patch';
 import SearchHistoryController from './search_history';
 import bslHelper from './bsl_helper';
 import { createHelpBrowser } from './help';
-import { createBase64TransferManager } from './base64_transfer';
+import {
+  AI_INLINE_DEFAULT_OPTIONS,
+  MANUAL_INLINE_PROVIDER_GROUP,
+  createAIInlineProvider,
+  isAIInlineOption,
+  isValidAIInlineOption
+} from './ai_inline_provider';
 
 const hiddenBlocksController = new HiddenBlocksController(monaco, function () {
   return window.engLang;
 });
 const searchHistoryController = new SearchHistoryController(monaco);
-const helpBrowser = createHelpBrowser(function () { return window.editor; });
-const base64Transfer = createBase64TransferManager();
+const aiInlineProvider = createAIInlineProvider({
+  getEditor: function () {
+    return window.editor && !window.editor.navi ? window.editor : null;
+  },
+  getOption: function (name) {
+    if (window.editor && typeof window.editor[name] != 'undefined')
+      return window.editor[name];
+    return window.editor_options[name];
+  },
+  sendEvent: function (name, params) { return window.sendEvent(name, params); },
+  isInlineEnabled: function () {
+    if (!window.editor || window.editor.navi || window.readOnlyMode)
+      return false;
 
+    let selection = window.editor.getSelection();
+    if (!selection || !selection.isEmpty())
+      return false;
+
+    let inlineSuggest = window.editor.getOption(monaco.editor.EditorOption.inlineSuggest);
+    return !inlineSuggest || inlineSuggest.enabled !== false;
+  }
+});
+const helpBrowser = createHelpBrowser(function () { return window.editor; }, function (params) {
+  window.sendEvent('EVENT_ON_LINK_CLICK', params);
+});
 // Иконки дерева переменных инлайнятся в бандл (data:-URI) через require.context, а не тянутся
 // отдельными файлами — это нужно для single-file сборки. В обычной сборке результат тот же:
 // url-loader инлайнит эти PNG (< 8 КБ), а копия в dist/tree/icons остаётся невостребованной.
@@ -50,9 +80,13 @@ function resolveTreeIcon(iconName) {
   return treeIcons[iconName] || treeIcons['undefined.png'] || '';
 }
 
-// NLS: monaco-editor-nls (setLocaleData/ruLocale) удалён — несовместим с 0.55; UI monaco
-// по умолчанию английский (русская локализация — отдельным шагом). MonacoEnvironment
-// (blob-воркер + globalAPI) задаётся в ./monaco-environment (импортирован выше, до monaco).
+const INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_OPTION = 'inlineSuggestionSyntaxHighlightingEnabled';
+const INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_DEFAULT = true;
+
+
+// NLS: штатная таблица monaco-editor выбирается webpack-опцией monacoLocale (ru по умолчанию)
+// и импортируется выше после polyfills, но до любого кода monaco. MonacoEnvironment
+// (blob-воркер + globalAPI) задаётся в ./monaco-environment.
 
 // #region global vars 
 window.languages = languages;
@@ -95,6 +129,11 @@ window.inlineDiffWidget = null;
 window.events_queue = [];
 window.colors = {};
 window.editor_options = [];
+Object.keys(AI_INLINE_DEFAULT_OPTIONS).forEach(function (name) {
+  window.editor_options[name] = AI_INLINE_DEFAULT_OPTIONS[name];
+});
+window.editor_options[INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_OPTION]
+  = INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_DEFAULT;
 window.snippets = {};
 window.bslSnippets = {};
 window.treeview = null;
@@ -103,55 +142,73 @@ window.selectedQueryDelimiters = new Map();
 window.reviewWidgets = new Map();
 window.currentIssue = -1;
 window.inlineSuggestionsChanged = new monaco.Emitter();
+window.aiInlineProgrammaticChangeDepth = 0;
 window.objectContext = null;
 // #endregion
 
 // #region public API
 /** @param {string} name диагностическое имя передаваемых данных */
 window.beginBase64Transfer = function (name) {
-  base64Transfer.begin(name);
+  helpBrowser.beginTransfer(name);
 }
 
 /** @param {string} chunk фрагмент Base64 или отдельно закодированная бинарная порция */
 window.pushBase64Chunk = function (chunk) {
-  base64Transfer.push(chunk);
+  helpBrowser.pushTransfer(chunk);
 }
 
-/** Завершает передачу и атомарно публикует собранный Blob. */
+/** Завершает постановку порций в очередь worker. */
 window.endBase64Transfer = function () {
-  base64Transfer.end();
+  helpBrowser.endTransfer();
 }
 
 /**
- * Загружает пакет синтакс-помощника 1С в текущую сессию.
+ * Загружает пакет справки 1С в текущую сессию.
  * Promise всегда разрешается объектом результата после готовности дерева и обоих индексов.
  * Успешно загруженный ранее пакет при ошибке не изменяется.
- * @param {Blob|File|string} [source] файл shcntx_*.hbk/shlang_*.hbk или его Base64-представление;
+ * На фазе prepared (готовы оглавление и префиксный индекс заголовков, полнотекстовая
+ * индексация ещё идёт) отправляет EVENT_ON_HELP_PREPARED с payload {kind}.
+ * После успешной загрузки пакета вида context/query/dcs отправляет событие
+ * EVENT_ON_HELP_READY с payload {kind}; shlang и ошибки ни одного события не создают.
+ * PREPARED не гарантирует последующего READY: при откате provisional-кандидата или
+ * ошибке полнотекстовой индексации READY не приходит.
+ * @param {Blob|File|string} [source] файл shcntx_*.hbk/shlang_*.hbk/shquery_*.hbk/dcsui_*.hbk
+ * или его Base64-представление;
  * без аргумента используется последняя завершённая порционная передача
  * @returns {Promise<{ok:boolean,kind:string|null,pages:number,error:string|null}>}
  */
 window.parseHelp = function (source) {
-  if (!arguments.length) {
-    if (base64Transfer.hasActive())
-      return helpBrowser.fail('Передача Base64 ещё не завершена');
-    const transferred = base64Transfer.getReady();
-    if (!transferred)
-      return helpBrowser.fail('Нет завершённой передачи Base64');
-    source = transferred.blob;
+  function onPrepared(kind) {
+    if (kind == 'context' || kind == 'query' || kind == 'dcs')
+      window.sendEvent('EVENT_ON_HELP_PREPARED', { kind: kind });
   }
-  return helpBrowser.parse(source).then(function (result) {
-    if (result.ok && result.kind == 'context')
-      window.sendEvent('EVENT_ON_HELP_READY');
+  const resultPromise = arguments.length ? helpBrowser.parse(source, onPrepared) : helpBrowser.parseTransferred(onPrepared);
+  return resultPromise.then(function (result) {
+    if (result.ok && (result.kind == 'context' || result.kind == 'query' || result.kind == 'dcs'))
+      window.sendEvent('EVENT_ON_HELP_READY', { kind: result.kind });
     return result;
   });
 }
 
 /**
- * Немедленно открывает закреплённую справа панель синтакс-помощника.
+ * Немедленно открывает закреплённую справа панель справки текущего режима.
+ * Если передана строка поиска, поведение совпадает с CTRL+F1: панель
+ * переключается на вкладку «Индекс», выполняется prefix-поиск по заголовкам
+ * и открывается первая найденная статья. Пока профильная справка текущего
+ * режима не готова, запрос игнорируется и панель не открывается.
+ * @param {string} [query] строка поиска по индексу заголовков;
+ * без аргумента панель открывается без изменения вкладки и статьи
  * @returns {void}
  */
-window.showHelp = function () {
-  helpBrowser.show();
+window.showHelp = function (query) {
+  if (arguments.length && query) {
+    if (!helpBrowser.isReady())
+      return;
+    helpBrowser.showIndex(String(query));
+  }
+  else {
+    helpBrowser.show();
+  }
 }
 
 /**
@@ -160,6 +217,11 @@ window.showHelp = function () {
  */
 window.showHelpLoader = function () {
   helpBrowser.showLoader();
+}
+
+window.getHelpState = function () {
+  const state = helpBrowser.getState();
+  return Object.assign({ ready: state.status == 'ready' }, state);
 }
 
 window.wordWrap = function (enabled) {
@@ -214,8 +276,15 @@ window.setText = function(txt, range, usePadding) {
   
   window.editor.checkBookmarks = false;
 
-  window.reserMark();    
-  bslHelper.setText(txt, range, usePadding);
+  window.reserMark();
+
+  beginAIInlineProgrammaticChange();
+  try {
+    bslHelper.setText(txt, range, usePadding);
+  }
+  finally {
+    endAIInlineProgrammaticChange();
+  }
   
   if (window.getText()) {
     checkBookmarksCount();
@@ -244,12 +313,18 @@ window.updateText = function(txt, clearUndoHistory = true) {
   if (mod_event)    
     window.setOption('generateModificationEvent', false);
 
-  eraseTextBeforeUpdate();
-  
-  if (clearUndoHistory)
-    window.editor.setValue(txt);
-  else
-    window.setText(txt);
+  beginAIInlineProgrammaticChange();
+  try {
+    eraseTextBeforeUpdate();
+
+    if (clearUndoHistory)
+      window.editor.setValue(txt);
+    else
+      window.setText(txt);
+  }
+  finally {
+    endAIInlineProgrammaticChange();
+  }
 
   if (window.getText()) {
     checkBookmarksCount();
@@ -281,7 +356,13 @@ window.setContent = function(text) {
   if (mod_event)    
     window.setOption('generateModificationEvent', false);
 
-  window.editor.setValue(text)
+  beginAIInlineProgrammaticChange();
+  try {
+    window.editor.setValue(text)
+  }
+  finally {
+    endAIInlineProgrammaticChange();
+  }
 
   if (mod_event)    
     window.setOption('generateModificationEvent', true);
@@ -576,6 +657,8 @@ window.setLanguageMode = function(mode) {
     monaco.editor.setModelLanguage(window.editor.getModel(), mode);
   }
 
+  helpBrowser.setLanguageMode(mode);
+
   let currentTheme = getCurrentThemeName();
   window.setTheme(currentTheme);
 
@@ -788,6 +871,15 @@ window.getCurrentLine = function() {
 window.getCurrentColumn = function() {
 
   return window.editor.getPosition().column;
+
+}
+
+window.getCurrentWord = function() {
+
+  const activeEditor = getActiveEditor();
+  const model = activeEditor && activeEditor.getModel();
+  const position = activeEditor && activeEditor.getPosition();
+  return model && position ? model.getWordAtPosition(position) : null;
 
 }
 
@@ -1218,13 +1310,35 @@ window.showInlineSuggestion = function(suggestions) {
   try {
 
     window.customInlineSuggestion = JSON.parse(suggestions);
-    window.inlineSuggestionsChanged.fire();
+
+    // В Monaco 0.55 смена provider event обновляет уже активную сессию, но не обязана
+    // создавать её. Явная штатная команда гарантирует показ переданной из 1С подсказки.
+    if (window.editor && !window.editor.navi && !window.readOnlyMode
+      && window.editor.getSelection().isEmpty()) {
+      window.editor.trigger('bsl-console-inline', 'editor.action.inlineSuggest.trigger', { explicit: true });
+    }
+
     return true;
 
 	}
 	catch (e) {
 		return { errorDescription: e.message };
 	}
+
+}
+
+window.resolveAIInlineCompletion = function (requestId, suggestions) {
+  return aiInlineProvider.resolve(requestId, suggestions);
+}
+
+window.triggerInlineSuggestions = function () {
+
+  if (!window.editor || window.editor.navi || window.readOnlyMode
+    || !window.editor.getSelection().isEmpty())
+    return false;
+
+  window.editor.trigger('bsl-console-ai-inline', 'editor.action.inlineSuggest.trigger', { explicit: true });
+  return true;
 
 }
 
@@ -1481,18 +1595,18 @@ window.getBreakpoints = function () {
 }
 
 window.setCurrentDebugLine = function (line) {
-  
+
   window.editor.currentDebugLine.clear();
 
-  debugLine = {
+  const debugLine = {
       range: new monaco.Range(line, 1, line),
       options: {
           isWholeLine: true,
           className: 'debug-line',
         }
   }
-  
-  pointer = {
+
+  const pointer = {
     range: new monaco.Range(line, 1, line),
     options: {
         isWholeLine: true,
@@ -1503,7 +1617,7 @@ window.setCurrentDebugLine = function (line) {
     }
   }
 
-  DebugLineSet = {
+  const DebugLineSet = {
     line: debugLine,
     pointer: pointer
   }
@@ -1615,8 +1729,33 @@ window.previousMatch = function () {
 
 window.setOption = function (optionName, optionValue) {
 
+  if (isAIInlineOption(optionName) && !isValidAIInlineOption(optionName, optionValue))
+    return false;
+
+  if (optionName == INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_OPTION
+    && typeof optionValue != 'boolean')
+    return false;
+
   window.editor[optionName] = optionValue;
   window.editor_options[optionName] = optionValue;
+
+  if (optionName == INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_OPTION
+    && window.editor && !window.editor.navi) {
+    window.editor.updateOptions({
+      inlineSuggest: {
+        syntaxHighlightingEnabled: optionValue
+      }
+    });
+  }
+
+  if (isAIInlineOption(optionName)) {
+    aiInlineProvider.optionChanged(optionName, optionValue);
+
+    if (optionName == 'generateAIInlineCompletionEvent' && optionValue !== true
+      && window.editor && !window.editor.navi) {
+      window.editor.trigger('bsl-console-ai-inline', 'editor.action.inlineSuggest.hide');
+    }
+  }
 
   if (optionName == 'renderMarginRevertIcon' || optionName == 'hideUnchangedRegions')
     updateDiffEditorOption(optionName, optionValue);
@@ -1652,7 +1791,9 @@ window.setOption = function (optionName, optionValue) {
 
 window.getOption = function (optionName) {
 
-  return window.editor[optionName];
+  return typeof window.editor[optionName] == 'undefined'
+    ? window.editor_options[optionName]
+    : window.editor[optionName];
   
 }
 
@@ -2303,6 +2444,10 @@ window.createEditor = function(language_id, text, theme) {
     renderValidationDecorations: "on",
     stickyScroll: {
       enabled: false
+    },
+    inlineSuggest: {
+      syntaxHighlightingEnabled:
+        window.editor_options[INLINE_SUGGESTION_SYNTAX_HIGHLIGHTING_OPTION]
     }
   });
 
@@ -2363,6 +2508,7 @@ for (const [key, lang] of Object.entries(window.languages)) {
   monaco.languages.registerDefinitionProvider(language.id, lang.definitionProvider);
   monaco.languages.registerCodeActionProvider(language.id, lang.codeActionProvider);
   
+  lang.inlineCompletionProvider.groupId = MANUAL_INLINE_PROVIDER_GROUP;
   lang.inlineCompletionProvider.onDidChangeInlineCompletions  = window.inlineSuggestionsChanged.event;
   monaco.languages.registerInlineCompletionsProvider(language.id, lang.inlineCompletionProvider);
 
@@ -2440,11 +2586,16 @@ for (const [key, lang] of Object.entries(window.languages)) {
 
 };
 
+monaco.languages.registerInlineCompletionsProvider(
+  ['bsl', 'bsl_query', 'dcs_query'],
+  aiInlineProvider.provider
+);
+
 const commandOnlyActions = ['saveref', 'requestMetadata'];
 
 monaco.editor.addEditorAction({
   id: 'bsl.showHelp',
-  label: 'Синтакс-помощник 1С',
+  label: 'Справка 1С',
   keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.F1],
   run: function (activeEditor) {
     if (window.editor && window.editor.navi && activeEditor && activeEditor.hasTextFocus
@@ -2556,7 +2707,13 @@ function initEditorEventListenersAndProperies() {
   window.editor.onKeyDown(e => editorOnKeyDown(e));
 
   window.editor.onDidChangeModelContent(e => {
-    
+
+    aiInlineProvider.recordContentChange(
+      window.editor.getModel(),
+      e,
+      window.aiInlineProgrammaticChangeDepth > 0
+    );
+
     calculateDiff();
 
     if (window.getOption('generateModificationEvent'))
@@ -2653,7 +2810,9 @@ function initEditorEventListenersAndProperies() {
   });
 
   window.editor.onDidChangeCursorSelection(e => {
-    
+
+    aiInlineProvider.cursorChanged();
+
     updateStatusBar();
     onChangeSnippetSelection(e);
     updateSelectedQueryDelimiters(e);
@@ -3323,6 +3482,8 @@ window.getLineNumber = function(originalLineNumber) {
 window.disposeEditor = function() {
 
   if (window.editor) {
+
+    aiInlineProvider.dispose();
 
     if (window.editor.navi) {
       // 0.55: НЕ диспозим суб-редакторы вручную — их владелец diff-редактор снимет сам при своём
@@ -4227,7 +4388,7 @@ function diffEditorOnKeyDown(e) {
   else if (e.keyCode == 9) {
     // Esc
     window.generateEscapeEvent();
-    window.closeSearchWidget();      
+    window.closeSearchWidget();
   }
   else if (e.keyCode == 61) {
     // F3
@@ -4312,6 +4473,7 @@ function editorOnKeyDown(e) {
   }
   else if (e.keyCode == 9) {
     // Esc
+    aiInlineProvider.cancel('hidden');
     window.generateEscapeEvent();
     setFindWidgetDisplay('none');
     window.hideSuggestionsList();
@@ -5555,6 +5717,14 @@ function onSuggestListMouseOver(activationEventEnabled) {
 
   }
 
+}
+
+function beginAIInlineProgrammaticChange() {
+  window.aiInlineProgrammaticChangeDepth++;
+}
+
+function endAIInlineProgrammaticChange() {
+  window.aiInlineProgrammaticChangeDepth = Math.max(0, window.aiInlineProgrammaticChangeDepth - 1);
 }
 
 function eraseTextBeforeUpdate() {
