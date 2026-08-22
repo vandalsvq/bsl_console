@@ -1,5 +1,5 @@
 ---
-issue: '-'
+issue: vandalsvq#1
 title: Потребление памяти консоли — исследование
 status: in-progress
 owner: Alex Aniskov

@@ -24,7 +24,7 @@
 
 **Активные треки:**
 
-1. **Потребление памяти** ([`specs/memory-footprint/`](specs/memory-footprint/research.md)) —
+1. **Потребление памяти** ([`specs/1/`](specs/1/research.md), issue [#1](https://github.com/vandalsvq/bsl_console/issues/1)) —
    исследование расхода памяти в поле 1С и его сокращение. Найдена и исправлена утечка: `calculateDiff()`
    создавал копию модели Monaco на каждое изменение текста (4 МБ на правку). Документы трека:
    `research.md` (измерения), `issue.md` (текст задачи автору), `result.md` (итог и что дальше).
