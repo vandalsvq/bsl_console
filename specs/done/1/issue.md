@@ -11,9 +11,12 @@ area:
 
 # Внутренняя задача (vandalsvq/bsl_console)
 
-Заведена как [vandalsvq/bsl_console#1](https://github.com/vandalsvq/bsl_console/issues/1) 22.08.2026.
-Здесь лежит исходник тела задачи — правится тут, потом синхронизируется в GitHub
-(`gh issue edit 1 --body-file ...`), чтобы текст не разъезжался.
+Заведена как [vandalsvq/bsl_console#1](https://github.com/vandalsvq/bsl_console/issues/1) 22.08.2026,
+**закрыта 23.08.2026**. Здесь лежит исходник тела задачи — правился тут, потом синхронизировался
+в GitHub (`gh issue edit 1 --body-file ...`), чтобы текст не разъезжался. Выводы, которые стоит
+помнить и вне задачи, вынесены закрывающим комментарием
+([#1 comment](https://github.com/vandalsvq/bsl_console/issues/1#issuecomment-5385185196)) —
+там же собраны правила полевых замеров.
 
 Заголовок: **Потребление памяти консоли в поле 1С: разбор источников и оптимизация**
 
