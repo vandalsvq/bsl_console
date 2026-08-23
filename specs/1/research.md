@@ -1,10 +1,10 @@
 ---
 issue: vandalsvq#1
 title: Потребление памяти консоли — исследование
-status: in-progress
+status: done
 owner: Alex Aniskov
 created: 2026-08-22
-updated: 2026-08-22
+updated: 2026-08-23
 area:
   - обвязка редактора
   - доставка
